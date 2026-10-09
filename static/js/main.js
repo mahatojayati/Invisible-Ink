@@ -152,6 +152,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     circle.classList.add('cover');
                     title.classList.add('cover-text');
                 }
+                
+                const warningBox = document.getElementById('pred-warning');
+                if (data.warning) {
+                    document.getElementById('warning-text').innerText = data.warning;
+                    warningBox.classList.remove('hidden');
+                } else {
+                    warningBox.classList.add('hidden');
+                }
 
             } else {
                 alert('Error: ' + data.error);
