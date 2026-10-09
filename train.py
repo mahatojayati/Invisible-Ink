@@ -8,9 +8,19 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 import numpy as np
+import random
+import argparse
 
-# Import the model architecture and embedding function
+# Set fixed seeds for reproducibility
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 from models.steganalysis import SteganalysisCNN
 from models.stego import hide_data
 
@@ -18,11 +28,6 @@ class StegoDataset(Dataset):
     def __init__(self, image_paths, transform=None):
         self.image_paths = image_paths
         self.transform = transform
-        
-        # We will create cover and stego pairs dynamically or they can be pre-generated.
-        # To save disk space, we load the base image. If index is even, we return Cover.
-        # If index is odd, we embed data and return Stego.
-        # This doubles our dataset size automatically.
         self.num_base_images = len(image_paths)
 
     def __len__(self):
@@ -39,9 +44,12 @@ class StegoDataset(Dataset):
             # Embed a random payload
             payload = "SECRET_" + str(np.random.randint(1000, 9999))
             img_arr = np.array(img)
-            # Use LSB
-            stego_arr = hide_data(img_arr, payload, method='lsb')
-            img = Image.fromarray(stego_arr)
+            try:
+                stego_arr = hide_data(img_arr, payload, method='lsb')
+                img = Image.fromarray(stego_arr)
+            except ValueError:
+                # If image too small for payload, skip embedding
+                pass
             label = 1
         else:
             label = 0
@@ -51,37 +59,61 @@ class StegoDataset(Dataset):
             
         return img, label
 
-def generate_synthetic_images(num_images=100, output_dir='dataset_images'):
-    """Generate some random fractal/noise images for training if no dataset is provided."""
-    os.makedirs(output_dir, exist_ok=True)
-    paths = []
-    for i in range(num_images):
-        path = os.path.join(output_dir, f"img_{i}.png")
-        if not os.path.exists(path):
-            # Create a simple synthetic image (Perlin noise like)
-            arr = np.random.randint(0, 256, (300, 300, 3), dtype=np.uint8)
-            # Smooth it to look slightly more like a natural image
-            import cv2
-            arr = cv2.GaussianBlur(arr, (5, 5), 0)
-            Image.fromarray(arr).save(path)
-        paths.append(path)
-    return paths
-
-def train_model():
-    print("Generating/loading base images...")
-    base_images = generate_synthetic_images(num_images=200) # Small dataset for demonstration
+def evaluate_model(model, loader, device, criterion):
+    model.eval()
+    total_loss = 0.0
+    all_preds = []
+    all_labels = []
     
-    # 1. SPLITTING STRATEGY (Avoid Data Leakage)
-    # We must split the BASE images into train/val/test BEFORE creating stego pairs.
-    # If we split after creating pairs, the model might memorize the cover image in Train
-    # and unfairly detect the stego version in Test.
+    with torch.no_grad():
+        for imgs, labels in loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+            
+            _, predicted = torch.max(outputs, 1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            
+    avg_loss = total_loss / len(loader)
+    
+    prec = precision_score(all_labels, all_preds, zero_division=0)
+    rec = recall_score(all_labels, all_preds, zero_division=0)
+    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    cm = confusion_matrix(all_labels, all_preds)
+    
+    return avg_loss, prec, rec, f1, cm, all_preds, all_labels
+
+def main():
+    parser = argparse.ArgumentParser(description="Train Steganalysis Model")
+    parser.add_argument('--dataset_dir', type=str, required=True, help="Path to directory containing pure cover images")
+    parser.add_argument('--epochs', type=int, default=5, help="Number of training epochs")
+    parser.add_argument('--batch_size', type=int, default=16, help="Batch size")
+    args = parser.parse_args()
+
+    set_seed(42)
+
+    # 1 & 2. Dataset verification
+    if not os.path.exists(args.dataset_dir):
+        raise FileNotFoundError(f"Dataset directory {args.dataset_dir} not found. Please provide a directory of cover images.")
+        
+    valid_exts = ('.png', '.jpg', '.jpeg', '.bmp')
+    base_images = [os.path.join(args.dataset_dir, f) for f in os.listdir(args.dataset_dir) if f.lower().endswith(valid_exts)]
+    
+    if len(base_images) < 10:
+        raise ValueError("Insufficient dataset size. Please provide at least 10 cover images.")
+
+    print(f"Found {len(base_images)} cover images. Stego images will be generated dynamically.")
+
+    # 3. Prevent Data Leakage & Class Imbalance
+    # Split base images first, then dataset class duplicates them exactly 50/50 Cover/Stego
     train_paths, test_paths = train_test_split(base_images, test_size=0.2, random_state=42)
     train_paths, val_paths = train_test_split(train_paths, test_size=0.2, random_state=42)
     
-    print(f"Dataset split (base images): {len(train_paths)} train, {len(val_paths)} val, {len(test_paths)} test")
+    print(f"Splits (base images) - Train: {len(train_paths)}, Val: {len(val_paths)}, Test: {len(test_paths)}")
 
-    # 2. PREPROCESSING (Must match inference EXACTLY)
-    # We use CenterCrop instead of Resize to avoid destroying LSB artifacts via interpolation.
+    # 4. Preprocessing identical to inference
     preprocessing_transform = transforms.Compose([
         transforms.CenterCrop((256, 256)),
         transforms.ToTensor(),
@@ -92,9 +124,9 @@ def train_model():
     val_dataset = StegoDataset(val_paths, transform=preprocessing_transform)
     test_dataset = StegoDataset(test_paths, transform=preprocessing_transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
     
     model = SteganalysisCNN()
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -103,9 +135,12 @@ def train_model():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    num_epochs = 3
-    print("Starting training...")
-    for epoch in range(num_epochs):
+    best_val_f1 = 0.0
+    best_model_state = None
+    
+    # 5 & 6. Reproducible training and Tracking metrics
+    print("\nStarting Training...")
+    for epoch in range(args.epochs):
         model.train()
         train_loss = 0.0
         for imgs, labels in train_loader:
@@ -117,45 +152,86 @@ def train_model():
             optimizer.step()
             train_loss += loss.item()
             
-        model.eval()
-        val_correct = 0
-        val_total = 0
-        with torch.no_grad():
-            for imgs, labels in val_loader:
-                imgs, labels = imgs.to(device), labels.to(device)
-                outputs = model(imgs)
-                _, predicted = torch.max(outputs, 1)
-                val_total += labels.size(0)
-                val_correct += (predicted == labels).sum().item()
-                
-        print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {train_loss/len(train_loader):.4f} | Val Accuracy: {100 * val_correct / val_total:.2f}%")
+        avg_train_loss = train_loss / len(train_loader)
         
-    print("Evaluating on Test Set...")
-    model.eval()
-    test_correct = 0
-    test_total = 0
-    with torch.no_grad():
-        for imgs, labels in test_loader:
-            imgs, labels = imgs.to(device), labels.to(device)
-            outputs = model(imgs)
-            _, predicted = torch.max(outputs, 1)
-            test_total += labels.size(0)
-            test_correct += (predicted == labels).sum().item()
-    print(f"Test Accuracy: {100 * test_correct / test_total:.2f}%")
+        val_loss, prec, rec, f1, cm, _, _ = evaluate_model(model, val_loader, device, criterion)
+        print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | Val F1: {f1:.4f}")
+        
+        # 9. Save the best validated model
+        if f1 > best_val_f1:
+            best_val_f1 = f1
+            best_model_state = model.state_dict().copy()
+
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    else:
+        print("Warning: Model did not improve F1 above 0. Using final epoch weights.")
+
+    # 7. Evaluate performance on an independent test set
+    print("\nEvaluating on Test Set...")
+    test_loss, prec, rec, f1, cm, preds, labels = evaluate_model(model, test_loader, device, criterion)
+    print(f"Test Precision: {prec:.4f} | Test Recall: {rec:.4f} | Test F1: {f1:.4f}")
+    print("Confusion Matrix:\n", cm)
     
-    # Save the trained model and class mapping
+    # 8. Compare against Baseline (Statistical PoV)
+    print("\nEvaluating Baseline (Statistical PoV Ratio) on Test Set...")
+    baseline_preds = []
+    for idx in range(len(test_dataset)):
+        base_idx = idx // 2
+        is_stego = (idx % 2 == 1)
+        img_path = test_paths[base_idx]
+        img = Image.open(img_path).convert('RGB')
+        
+        if is_stego:
+            img_arr = np.array(img)
+            payload = "SECRET_" + str(np.random.randint(1000, 9999))
+            try:
+                stego_arr = hide_data(img_arr, payload, method='lsb')
+                img = Image.fromarray(stego_arr)
+            except ValueError:
+                pass
+                
+        flat = np.array(img).flatten()
+        counts, _ = np.histogram(flat, bins=256, range=(0, 256))
+        diff1 = np.sum(np.abs(counts[0::2] - counts[1::2]))
+        diff2 = np.sum(np.abs(counts[1:-1:2] - counts[2::2]))
+        ratio = float(diff1 / (diff2 + 1e-5))
+        pred = 1 if ratio < 0.90 else 0
+        baseline_preds.append(pred)
+        
+    base_prec = precision_score(labels, baseline_preds, zero_division=0)
+    base_rec = recall_score(labels, baseline_preds, zero_division=0)
+    base_f1 = f1_score(labels, baseline_preds, zero_division=0)
+    print(f"Baseline Precision: {base_prec:.4f} | Baseline Recall: {base_rec:.4f} | Baseline F1: {base_f1:.4f}")
+
+    # 10. Safeguard against deploying a collapsed model
+    if f1 < 0.55 or cm.min() == 0:
+        print("\n[!] SAFEGUARD TRIGGERED: Model exhibits poor performance or class collapse.")
+        print("[!] The model predicts mostly one class or fails to detect steganography reliably.")
+        print("[!] The trained model will NOT be saved. Please provide a larger dataset or train longer.")
+        exit(1)
+
+    print("\nModel passed safeguards. Saving model...")
     os.makedirs('models', exist_ok=True)
-    torch.save(model.state_dict(), 'models/stego_model.pth')
+    torch.save(best_model_state, 'models/stego_model.pth')
     
-    class_mapping = {
-        "0": "Cover",
-        "1": "Stego"
-    }
+    class_mapping = {"0": "Cover", "1": "Stego"}
     with open('models/class_mapping.json', 'w') as f:
         json.dump(class_mapping, f)
         
-    print("Model saved to models/stego_model.pth")
-    print("Class mapping saved to models/class_mapping.json")
+    training_config = {
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "optimizer": "Adam",
+        "learning_rate": 0.001,
+        "test_f1_score": f1,
+        "test_precision": prec,
+        "test_recall": rec
+    }
+    with open('models/training_config.json', 'w') as f:
+        json.dump(training_config, f)
+        
+    print("Successfully saved model, class mapping, and training config.")
 
 if __name__ == "__main__":
-    train_model()
+    main()
