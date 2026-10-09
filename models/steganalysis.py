@@ -29,10 +29,14 @@ if HAS_TORCH:
             return x
 
     model = SteganalysisCNN()
+    import os
+    weight_path = os.path.join(os.path.dirname(__file__), 'stego_model.pth')
+    if os.path.exists(weight_path):
+        model.load_state_dict(torch.load(weight_path, map_location='cpu'))
     model.eval()
 
     transform = transforms.Compose([
-        transforms.Resize((256, 256)),
+        transforms.CenterCrop((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
