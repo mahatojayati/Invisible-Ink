@@ -12,6 +12,16 @@ from models.steganalysis import analyze_image
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max
 
+import models.steganalysis as sa
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({
+        'status': 'ok',
+        'torch_available': sa.HAS_TORCH,
+        'model_loaded': sa.model is not None,
+    })
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -83,6 +93,14 @@ def analyze():
         # ML Steganalysis
         result = analyze_image(img)
         return jsonify(result)
+    except RuntimeError as re:
+        # Explicitly handle model unavailability so frontend doesn't show "Cover"
+        return jsonify({
+            'prediction': 'Unavailable',
+            'confidence': 0.0,
+            'laplacian_variance': 0.0,
+            'error': str(re)
+        }), 503
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

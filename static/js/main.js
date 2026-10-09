@@ -162,7 +162,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
             } else {
-                alert('Error: ' + data.error);
+                if (response.status === 503) {
+                    const resultBox = document.getElementById('analyze-result');
+                    resultBox.classList.remove('hidden');
+                    
+                    const circle = document.querySelector('.circle');
+                    const text = document.querySelector('.percentage');
+                    const title = document.getElementById('pred-class');
+                    const confSpan = document.getElementById('pred-conf');
+                    
+                    circle.setAttribute('stroke-dasharray', `0, 100`);
+                    text.textContent = `!`;
+                    title.textContent = 'Unavailable';
+                    confSpan.textContent = `N/A`;
+                    
+                    circle.classList.remove('stego', 'cover');
+                    title.classList.remove('stego-text', 'cover-text');
+                    
+                    const warningBox = document.getElementById('pred-warning');
+                    document.getElementById('warning-text').innerText = data.error || 'Model unavailable.';
+                    warningBox.classList.remove('hidden');
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error occurred.'));
+                }
             }
         } catch (error) {
             alert('An error occurred.');

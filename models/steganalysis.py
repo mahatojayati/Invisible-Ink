@@ -9,8 +9,9 @@ try:
     import torch.nn.functional as F
     import torchvision.transforms as transforms
     HAS_TORCH = True
-except ImportError:
+except ImportError as e:
     HAS_TORCH = False
+    TORCH_ERROR = str(e)
 
 if HAS_TORCH:
     class SteganalysisCNN(nn.Module):
@@ -52,11 +53,12 @@ def initialize_model():
         except Exception as e:
             print(f"Failed to load class mapping: {e}")
 
-    # Load weights
-    weight_path = os.path.join(os.path.dirname(__file__), 'stego_model.pth')
+    # Load weights using absolute path based on this file's location
+    weight_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stego_model.pth')
     if os.path.exists(weight_path):
         try:
             device = torch.device('cpu')
+            # Load with weights_only=True if supported, but standard load works
             model.load_state_dict(torch.load(weight_path, map_location=device))
         except Exception as e:
             print(f"Failed to load weights: {e}")
@@ -64,6 +66,7 @@ def initialize_model():
             return False
     else:
         # Untrained model is not useful, set to None
+        print(f"Model checkpoint not found at {weight_path}")
         model = None
         return False
 
@@ -94,47 +97,35 @@ def analyze_image(img):
     img_arr = np.array(img.convert('L'))
     laplacian_var = cv2.Laplacian(img_arr, cv2.CV_64F).var()
 
-    if model is not None and HAS_TORCH:
-        try:
-            # The tensor needs to be at least 256x256 for CenterCrop.
-            # Handle images smaller than 256x256 gracefully by padding
-            if img.width < 256 or img.height < 256:
-                pad_transform = transforms.Pad((max(0, (256 - img.width) // 2), max(0, (256 - img.height) // 2)), fill=0)
-                img_for_tensor = pad_transform(img)
-            else:
-                img_for_tensor = img
+    if not HAS_TORCH:
+        raise RuntimeError(f"Model unavailable: PyTorch is not installed in this environment. (ImportError: {TORCH_ERROR})")
+    
+    if model is None:
+        weight_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stego_model.pth')
+        raise RuntimeError(f"Model unavailable: Checkpoint not found at {weight_path} or failed to load.")
 
-            input_tensor = transform(img_for_tensor).unsqueeze(0)
-            with torch.no_grad():
-                output = model(input_tensor)
-                probabilities = F.softmax(output, dim=1).numpy()[0]
-            
-            predicted_class_idx = int(np.argmax(probabilities))
-            confidence = float(probabilities[predicted_class_idx])
-            prediction = class_mapping.get(predicted_class_idx, "Unknown")
-            
-            return {
-                'prediction': prediction,
-                'confidence': confidence,
-                'laplacian_variance': float(laplacian_var)
-            }
-        except Exception as e:
-            raise RuntimeError(f"Inference error: {str(e)}")
-    else:
-        # Strict statistical fallback without fabricating confidence
-        flat = np.array(img).flatten()
-        counts, _ = np.histogram(flat, bins=256, range=(0, 256))
+    try:
+        # The tensor needs to be at least 256x256 for CenterCrop.
+        # Handle images smaller than 256x256 gracefully by padding
+        if img.width < 256 or img.height < 256:
+            pad_transform = transforms.Pad((max(0, (256 - img.width) // 2), max(0, (256 - img.height) // 2)), fill=0)
+            img_for_tensor = pad_transform(img)
+        else:
+            img_for_tensor = img
+
+        input_tensor = transform(img_for_tensor).unsqueeze(0)
+        with torch.inference_mode():
+            output = model(input_tensor)
+            probabilities = F.softmax(output, dim=1).numpy()[0]
         
-        diff1 = np.sum(np.abs(counts[0::2] - counts[1::2]))
-        diff2 = np.sum(np.abs(counts[1:-1:2] - counts[2::2]))
-        
-        ratio = float(diff1 / (diff2 + 1e-5))
-        is_stego = ratio < 0.90
+        predicted_class_idx = int(np.argmax(probabilities))
+        confidence = float(probabilities[predicted_class_idx])
+        prediction = class_mapping.get(predicted_class_idx, "Unknown")
         
         return {
-            'prediction': 'Stego' if is_stego else 'Cover',
-            'confidence': 0.0, # Do not fabricate confidence
-            'laplacian_variance': float(laplacian_var),
-            'pov_ratio': ratio,
-            'warning': 'Model untrained or missing. Used statistical fallback.'
+            'prediction': prediction,
+            'confidence': confidence,
+            'laplacian_variance': float(laplacian_var)
         }
+    except Exception as e:
+        raise RuntimeError(f"Inference error: {str(e)}")
