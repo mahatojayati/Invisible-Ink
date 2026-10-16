@@ -58,6 +58,12 @@ class TestSteganalysisApp(unittest.TestCase):
         stego_arr = hide_data(img_arr, payload, method='lsb')
         extracted = extract_data(stego_arr, method='lsb')
         self.assertEqual(payload, extracted, "LSB extraction failed.")
+        
+        # Test Adaptive
+        payload_adapt = "TESTING_ADAPTIVE_456"
+        stego_arr_adapt = hide_data(img_arr, payload_adapt, method='adaptive')
+        extracted_adapt = extract_data(stego_arr_adapt, method='adaptive')
+        self.assertEqual(payload_adapt, extracted_adapt, "Adaptive extraction failed.")
 
     def test_02_invalid_and_corrupt_files(self):
         """Test API behavior with invalid files, corrupted images, and unsupported formats."""
@@ -149,9 +155,12 @@ class TestSteganalysisApp(unittest.TestCase):
         print(f"False Negative Rate (FNR): {fnr:.4f}")
         print("------------------------------\n")
         
-        # Regression Test: Check for model collapse (Predicts Cover for everything)
+        # Regression Test: Check for model collapse (Predicts Cover or Stego for everything)
         if sum(all_preds) == 0:
             self.fail("Regression Test Failed: Model exhibits class collapse and predicts 'Cover' for every single test image. (Even on known stego images).")
+        if sum(all_preds) == len(all_preds):
+            self.fail("Regression Test Failed: Model exhibits class collapse and predicts 'Stego' for every single test image. (Even on known clean cover images).")
+        self.assertGreaterEqual(f1, 0.55, f"Model F1-score {f1:.4f} is below the acceptable threshold of 0.55.")
 
 if __name__ == '__main__':
     unittest.main()
