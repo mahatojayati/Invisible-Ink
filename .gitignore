@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+venv_app/
+env/
+ENV/
+
+# Temporary files and uploads
+*.log
+tmp/
+temp/
+static/uploads/
+.cache/
+.pytest_cache/

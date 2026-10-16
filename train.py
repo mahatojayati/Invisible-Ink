@@ -90,6 +90,7 @@ def main():
     parser.add_argument('--dataset_dir', type=str, required=True, help="Path to directory containing pure cover images")
     parser.add_argument('--epochs', type=int, default=5, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=16, help="Batch size")
+    parser.add_argument('--lr', type=float, default=0.0003, help="Learning rate (default: 0.0003)")
     args = parser.parse_args()
 
     set_seed(42)
@@ -133,7 +134,7 @@ def main():
     model.to(device)
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
     best_val_f1 = 0.0
     best_model_state = None
@@ -149,6 +150,7 @@ def main():
             outputs = model(imgs)
             loss = criterion(outputs, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += loss.item()
             
@@ -158,9 +160,12 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | Val F1: {f1:.4f}")
         
         # 9. Save the best validated model
-        if f1 > best_val_f1:
+        if f1 > best_val_f1 and (cm[0, 0] > 0 and cm[1, 1] > 0):
             best_val_f1 = f1
-            best_model_state = model.state_dict().copy()
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        elif best_model_state is None and f1 >= best_val_f1:
+            best_val_f1 = f1
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -205,7 +210,7 @@ def main():
     print(f"Baseline Precision: {base_prec:.4f} | Baseline Recall: {base_rec:.4f} | Baseline F1: {base_f1:.4f}")
 
     # 10. Safeguard against deploying a collapsed model
-    if f1 < 0.55 or cm.min() == 0:
+    if f1 < 0.55 or len(np.unique(preds)) < 2:
         print("\n[!] SAFEGUARD TRIGGERED: Model exhibits poor performance or class collapse.")
         print("[!] The model predicts mostly one class or fails to detect steganography reliably.")
         print("[!] The trained model will NOT be saved. Please provide a larger dataset or train longer.")
